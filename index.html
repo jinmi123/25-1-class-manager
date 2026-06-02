@@ -2321,7 +2321,14 @@ function getCurrentAttendance() {
 
     const today = fmt(new Date());
     const todayLogs = logs.filter(l => l.date === today && l.basis === '缺旷登记');
-    const allActive = students.filter(s => s.status === '在读');
+
+    // 晚自习只统计住校生，其他时段统计全部在读学生
+    let allActive = [];
+    if (periodInfo.timeLabel === '晚自习') {
+        allActive = students.filter(s => s.status === '在读' && s.zoudu !== '是');
+    } else {
+        allActive = students.filter(s => s.status === '在读');
+    }
     const total = allActive.length;
 
     const absentSet = new Set();
@@ -2330,19 +2337,15 @@ function getCurrentAttendance() {
         const code = l.code;
         const reason = l.reason || '';
 
-        // 请假：只要原因中包含当前时段标签（上午/下午/晚自习），则该生该时段所有节次视为缺勤
+        // 1. 请假：时段匹配
         if (code === '请假') {
-            if (periodInfo.timeLabel === '上午' && reason.includes('上午')) {
-                absentSet.add(student);
-            } else if (periodInfo.timeLabel === '下午' && reason.includes('下午')) {
-                absentSet.add(student);
-            } else if (periodInfo.timeLabel === '晚自习' && reason.includes('晚自习')) {
-                absentSet.add(student);
-            }
+            if (periodInfo.timeLabel === '上午' && reason.includes('上午')) absentSet.add(student);
+            else if (periodInfo.timeLabel === '下午' && reason.includes('下午')) absentSet.add(student);
+            else if (periodInfo.timeLabel === '晚自习' && reason.includes('晚自习')) absentSet.add(student);
             continue;
         }
 
-        // 旷课（A1、A3）：时段匹配且节次匹配
+        // 2. 旷课（A1/A3）：时段匹配且节次匹配（若没有节次则默认整时段缺勤）
         if (code === 'A1' || code === 'A3') {
             let timeLabel = null;
             if (reason.includes('上午')) timeLabel = '上午';
@@ -2353,22 +2356,50 @@ function getCurrentAttendance() {
             const periodMatch = reason.match(/第([\d,]+)节/);
             if (periodMatch) {
                 const periods = periodMatch[1].split(',').map(Number);
-                if (periods.includes(periodInfo.period)) {
-                    absentSet.add(student);
-                }
+                if (periods.includes(periodInfo.period)) absentSet.add(student);
             } else {
-                // 没有具体节次，默认该时段所有节次缺勤
+                absentSet.add(student); // 无具体节次，默认该时段缺勤
+            }
+            continue;
+        }
+
+        // 3. 迟到/早退/旷操（A2/A4）：影响所在整个时段（仅限上午/下午）
+        if (code === 'A2' || code === 'A4') {
+            if (periodInfo.timeLabel === '上午' || periodInfo.timeLabel === '下午') {
                 absentSet.add(student);
             }
             continue;
         }
 
-        // 迟到、早退、旷操等暂不视为当前节次缺勤
+        // 4. 自定义事项（Z1/Z3）：根据时段描述计入缺勤（与仪表盘规则一致）
+        if ((code === 'Z1' || code === 'Z3') && 
+            (reason.startsWith('特殊事项：') || reason.startsWith('走读/特殊事项：'))) {
+            const detail = reason.replace('特殊事项：', '').replace('走读/特殊事项：', '');
+            if (periodInfo.timeLabel === '上午' && (detail.includes('早上') || detail.includes('上午'))) {
+                absentSet.add(student);
+            } else if (periodInfo.timeLabel === '下午' && detail.includes('下午')) {
+                absentSet.add(student);
+            } else if (periodInfo.timeLabel === '晚自习' && (detail.includes('晚上') || detail.includes('晚自习'))) {
+                absentSet.add(student);
+            }
+        }
+    }
+
+    // 晚自习剔除走读生（防止误登记走读生晚自习缺勤）
+    if (periodInfo.timeLabel === '晚自习') {
+        const zhuxiaoNames = new Set(allActive.map(s => s.name));
+        for (const absent of absentSet) {
+            if (!zhuxiaoNames.has(absent)) absentSet.delete(absent);
+        }
     }
 
     const present = total - absentSet.size;
+    const label = periodInfo.timeLabel === '晚自习' 
+        ? periodInfo.name + '（住校）' 
+        : periodInfo.name;
+
     return {
-        label: periodInfo.name,
+        label: label,
         present: present,
         absent: absentSet.size
     };
